@@ -120,7 +120,7 @@ def render(data, res, map_id):
 def createVtm(map_id, map_edge, map_coast, map_biome, map_seed, size):
     if not os.path.isdir(map_id):
         os.mkdir(map_id)
-    with open(f"{map_id}/{map_id}.vtm", "w", newline=None) as f:
+    with open(f"{map_id}/{map_id}-s.vtm", "w", newline=None) as f:
         f.write("VTMapCustom\n{\n")
         f.write(f"\tmapID = {map_id}\n")
         f.write("\tmapName = \n\tmapDescription = \n\tmapType = HeightMap\n")

@@ -6,6 +6,8 @@ import random
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.path as mpath
+import numpy as np
+import itertools
 
 tagTable = {
     "highway":['secondary', 'trunk'],
@@ -83,22 +85,67 @@ def getHeights(x, y, heights):
     y = max(0, min(y, heights.shape[0] - 1))
     return heights[y, x] * 3.072 + 4
 
+def avg(direction):
+    return ((sum([n[0] for n in direction]) / len(direction), sum([n[1] for n in direction]) / len(direction)))
+
+class Node:
+    def __init__(self, x, h, y, px, py, id, next, prev):
+        self.x = x
+        self.h = h + 2
+        self.y = y
+        
+        # visualization coordinates
+        self.px = px
+        self.py = py
+
+        # openstreetmap node ids
+        self.id = id
+
+        self.next = next
+        self.prev = prev
+
+        self.connected = []
+
+        self.type = 0
+
+class RoadSegment:
+    
+    id_iter = itertools.count()
+
+    def __init__(self, s, e, roadType = 0, ps = None, ns = None):
+        # vtol parameters
+        self.id = next(self.id_iter)
+        self.type = roadType
+        self.bridge = False
+        self.length = math.sqrt((s.x - e.x) ** 2 + (s.y - e.y) ** 2)
+        self.s = s
+        self.m = ((s.x + e.x) / 2, (s.h + e.h) / 2 + 2, (s.y + e.y) / 2)
+        self.e = e
+        self.ps = ps
+        self.ns = ns
+        
+    def __str__(self):
+        string = "\t\t\tSegment\n\t\t\t{\n"
+        string += f"\t\t\t\tid = {self.id}\n"
+        string += f"\t\t\t\ttype = {self.type}\n"
+        string += f"\t\t\t\tbridge = {self.bridge}\n"
+        string += f"\t\t\t\tlength = {self.length}\n"
+        string += f"\t\t\t\ts = ({self.s.x}, {self.s.h}, {self.s.y})\n"
+        string += f"\t\t\t\tm = ({self.m[0]}, {self.m[1]}, {self.m[2]})\n"
+        string += f"\t\t\t\te = ({self.e.x}, {self.e.h}, {self.e.y})\n"
+        if self.ps is not None:
+            string += f"\t\t\t\tps = {self.ps.id}\n"
+        if self.ns is not None:
+            string += f"\t\t\t\tns = {self.ns.id}\n"
+        string += "\t\t\t}\n"
+        return string
+        
+    def chunk(self):
+        return (int(self.m[0] // 3072), int(self.m[2] // 3072))
+    
+
+    
 def generateRoads(map_id, lat, lon, size, chunks, heights):
-
-    """
-    Generate road data for the specified map.
-
-    Parameters:
-    map_id (str): The ID of the map.
-    lat (float): The latitude of the center of the map.
-    lon (float): The longitude of the center of the map.
-    size (int): The size of the map.
-    scale (int): The scaling factor.
-    detail (int): The detail level.
-
-    Returns:
-    None
-    """
     # (min_lat, min_lon, max_lat, max_lon)
     map_bbox = (
         lat - km_to_deg_lat(size / 2),
@@ -109,61 +156,123 @@ def generateRoads(map_id, lat, lon, size, chunks, heights):
 
     road_data = fetch_roads(map_bbox, map_id)
 
-    
+    nodes = []
+    head_nodes = []
 
-    segments = []
-
-    j = 0
     for way in road_data["elements"]:
-        j += 1
         if "tags" not in way:
             continue
         elif check_tags(way["tags"]):
-            points = []
-            last = None
-            rcolor = None
-            direction = []
+            i = 0
             for coords in way["geometry"]:
                 x = lon_to_px(coords["lon"], map_bbox, heights.shape[1])
                 y = lat_to_px(coords["lat"], map_bbox, heights.shape[0])
                 yorg = y
+                xorg = x
                 # y is actually flipped top to bottom
                 y = heights.shape[0] - y
-                points.append((x, y))
 
-                if last is None:
-                    last = (x, y, yorg)
+                # get the height of the terrain at this point
+                height = getHeights(x, y, heights)
+
+                # Convert to bezier in game units (1m = 3072 game units)
+                # so total size is 3072*chunks units square, origin is the bottom left corner
+                total_size = 3072 * chunks
+                
+                # scale from pixel coordinates to game units, max pixel size is height.shape[0]
+                x = x / heights.shape[1] * total_size
+                y = y / heights.shape[0] * total_size
+
+                # add the node to the list
+                nodes.append(Node(x, height, y, xorg, yorg, way["nodes"][i], None, None))
+                
+                if i > 0:
+                    nodes[-2].next = nodes[-1]
+                    nodes[-1].prev = nodes[-2]
                 else:
-                    if len(direction) == 0:
-                        direction.append((x - last[0], y - last[1]))
-                        rcolor = random.randint(0, 255)
-                    else:
-                        # if the direction changes, refresh last
-                        avgDir = (sum([d[0] for d in direction]) / len(direction), sum([d[1] for d in direction]) / len(direction))
-                        curDir = (x - last[0], y - last[1])
+                    # get the index of the tag in the tagTable
+                    nodes[-1].type = tagTable["highway"].index(way["tags"]["highway"])
+                    head_nodes.append(nodes[-1])
+                i += 1
 
-                        # if we are going straight, add to the direction list and go to next node
-                        eps = 8
-                        if abs(avgDir[0] - curDir[0]) < eps and abs(avgDir[1] - curDir[1]) < eps:
-                            # go to next node
-                            direction.append((x - last[0], y - last[1]))
-                        else:
-                            # finish the segment
-                            h1 = getHeights(last[0], last[1], heights)
-                            h2 = getHeights(x, y, heights)                 
-                            c = tagTable["highway"].index(way["tags"]["highway"])           
-                            segments.append({
-                                "s": (last[0], h1, last[1]),
-                                "e": (x, h2, y),
-                                "sd": (last[0], last[2]),
-                                "ed": (x, yorg),
-                                "type": c,
-                                "color": (colorTable[c][0], colorTable[c][1], rcolor),
-                                "ide": j
-                            })
-                            direction = []
-                            last = (x, y, yorg)
-            
+    segments = []
+    orphans = []
+    def make_segment(s, ps=None):
+        # make a segment from s to e
+        e = s.next
+        
+        direction = [(s.x, s.y), (e.x, e.y)]
+
+        while e.next is not None:
+            # if the next node is in a straight line, skip to the next node
+            a = avg(direction)
+            eps = 300
+            if abs(a[0] - e.next.x) < eps and abs(a[1] - e.next.y) < eps:
+                e = e.next
+                direction.append((e.x, e.y))
+            else:
+                # we have reached a corner, make a segment
+                segments.append(RoadSegment(s, e, s.type, ps))
+
+                # if the end has a next, make another segment
+                if e.next is not None:
+                    make_segment(e, segments[-1])
+                else:
+                    orphans.append(e)
+                return
+    print(f"There are {len(orphans)} orphan nodes")
+
+    # for node in head_nodes, try and make a segment, skipping to next if the point is in a straight line
+    for node in head_nodes:
+        s = node
+        if node.next is None:
+            print("Orphan head node")
+            continue
+        make_segment(s)
+
+    for segment in segments:
+        # if the segment has a ps, find and connect its ns  
+        if segment.ps is not None:
+            for other in segments:
+                if segment.ps is other:
+                    segment.ps = other
+                    other.ns = segment
+                    break
+
+    # ensure all segments are connected if their start/end are close enough
+    eps = 200
+    for segment in segments:
+        for other in segments:
+            if segment is other:
+                continue
+            # if segment has no next segment and other has no previous segment
+            if segment.ns is None and other.ps is None:
+                if abs(segment.e.x - other.s.x) < eps and abs(segment.e.y - other.s.y) < eps:
+                    print("Connecting segment")
+                    segment.ns = other
+                    other.ps = segment
+
+                    segment.e = other.s
+                    
+                    # update the length of the segment
+                    segment.length = math.sqrt((segment.s.x - segment.e.x) ** 2 + (segment.s.y - segment.e.y) ** 2)
+                    break
+
+            # if segment has no previous segment and other has no next segment
+            if segment.ps is None and other.ns is None:
+                if abs(segment.s.x - other.e.x) < eps and abs(segment.s.y - other.e.y) < eps:
+                    print("Connecting segment")
+                    segment.ps = other
+                    other.ns = segment
+
+                    segment.s = other.e
+
+                    # update the length of the segment
+                    segment.length = math.sqrt((segment.s.x - segment.e.x) ** 2 + (segment.s.y - segment.e.y) ** 2)
+                    
+                
+    print(f"Generated {len(segments)} segments")
+    
     # Draw over the map
     fig, ax = plt.subplots(figsize=(heights.shape[0]/100, heights.shape[1]/100))
     ax.imshow(heights, cmap='jet')
@@ -171,119 +280,47 @@ def generateRoads(map_id, lat, lon, size, chunks, heights):
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
     Path = mpath.Path
 
-    i = 0
-    chunksf = {}
-    last_segment = None
     for segment in segments:
-        i += 1
+        # draw the segment as a bezier curve
+        mid = ((segment.s.px + segment.e.px) / 2, (segment.s.py + segment.e.py) / 2)
+        p = mpath.Path([(segment.s.px, segment.s.py), mid, (segment.e.px, segment.e.py)], [mpath.Path.MOVETO, mpath.Path.CURVE3, mpath.Path.CURVE3])
+        patch = mpatches.PathPatch(p, facecolor='none', edgecolor=(random.random(), random.random(), random.random()), lw=1)
+        ax.add_patch(patch)
 
-        # Draw the road on the map
-        m = ((segment["sd"][0] + segment["ed"][0]) / 2, (segment["sd"][1] + segment["ed"][1]) / 2)
-        p = mpatches.PathPatch(
-            Path([(segment["sd"][0], segment["sd"][1]), m, (segment["ed"][0], segment["ed"][1])], [Path.MOVETO, Path.CURVE3, Path.CURVE3]),
-            fc='none', transform=ax.transData, edgecolor=(segment["color"][0] / 255, segment["color"][1] / 255, segment["color"][2] / 255), lw=1
-        )
-        ax.add_patch(p)
-
-
-        # Convert to bezier in game units (1m = 3072 game units)
-        # so total size is 3072*chunks units square, origin is the bottom left corner
-        total_size = 3072 * chunks
-        
-        # scale from pixel coordinates to game units, max pixel size is height.shape[0]
-        s = (segment["s"][0] / heights.shape[0] * total_size, segment["s"][1], segment["s"][2] / heights.shape[0] * total_size)
-        e = (segment["e"][0] / heights.shape[0] * total_size, segment["e"][1], segment["e"][2] / heights.shape[0] * total_size)
-
-        # middle point is the average of the start and end points
-        m = ((s[0] + e[0]) / 2, (s[1] + e[1]) / 2, (s[2] + e[2]) / 2)        
-
-        length = math.sqrt((s[0] - e[0]) ** 2 + (s[1] - e[1]) ** 2 + (s[2] - e[2]) ** 2)
-
-        # figure out which chunks this segment is in
-        cx = int(m[0] // 3072)
-        cy = int(m[2] // 3072)
-
-
-        segmentg = {
-            "id": i,
-            "ide": segment["ide"],
-            "type": segment["type"],
-            "bridge": False,
-            "length": length,
-            "s": s,
-            "m": m,
-            "e": e,
-        }
-
-        # check for connections if ides are the same
-        if last_segment is not None and last_segment[1]["ide"] == segmentg["ide"]:
-            # determine if they already start/end near the same point
-            dist = math.sqrt((last_segment[1]["e"][0] - segmentg["s"][0]) ** 2 + (last_segment[1]["e"][2] - segmentg["s"][2]) ** 2)
-                
-            if dist < 200:
-                segmentg["s"] = last_segment[1]["e"]
-                last_segment[1]["ns"] = segmentg["id"]
-                segmentg["ps"] = last_segment[1]["id"]
-
-                
-                # if there is a connection, draw a circle
-                p = mpatches.Circle((segment["sd"][0], segment["sd"][1]), 3, fc=(segment["color"][0] / 255, segment["color"][1] / 255, segment["color"][2] / 255), ec='none', transform=ax.transData)
-                ax.add_patch(p)
-        
-
-        if (cx, cy) not in chunksf:
-            chunksf[(cx, cy)] = []
-            
-        if last_segment is not None:
-            chunksf[last_segment[0]].append(last_segment[1])
-
-        last_segment = ((cx, cy), segmentg)
-    chunksf[last_segment[0]].append(last_segment[1])
-
-    print(f"Generated {i} segments")
-    print(f"Generated {len(chunksf)} chunks")
     plt.savefig(f"{map_id}/roads.png", bbox_inches='tight', pad_inches=0)
 
-    
-
+    # divide into chunks
+    chunked_segments = {}
+    for segment in segments:
+        chunk = segment.chunk()
+        if chunk not in chunked_segments:
+            chunked_segments[chunk] = []
+        chunked_segments[chunk].append(segment)
+        
+    # save the segments to a file
     with open(f"{map_id}/segments.txt", "w") as f:
-        # header:
-        f.write('\tBezierRoads\n\t{\n')
-        
-        for chunk in chunksf:
-            f.write('\t\tChunk\n\t\t{\n\t\t\t')
-            f.write(f'grid = ({chunk[0]}, {chunk[1]})\n')
+        f.write("\tBezierRoads\n\t{\n")
+        for chunk in chunked_segments:
+            f.write(f"\t\tChunk\n\t\t")
+            f.write("{\n\t\t\tgrid = (")
+            f.write(f"{chunk[0]}, {chunk[1]}")
+            f.write(")\n")
+            for segment in chunked_segments[chunk]:
+                f.write(str(segment))
+            f.write("\t\t}\n")
+        f.write("\t}\n")
+    print("Saved road data to file")
 
-            for segment in chunksf[chunk]:
-                f.write('\t\t\tSegment\n\t\t\t{\n')
-                f.write(f'\t\t\t\tid = {segment["id"]}\n')
-                f.write(f'\t\t\t\ttype = {segment["type"]}\n')
-                f.write(f'\t\t\t\tbridge = {segment["bridge"]}\n')
-                f.write(f'\t\t\t\tlength = {segment["length"]}\n')
-                f.write(f'\t\t\t\ts = ({segment["s"][0]}, {segment["s"][1]}, {segment["s"][2]})\n')
-                f.write(f'\t\t\t\tm = ({segment["m"][0]}, {segment["m"][1]}, {segment["m"][2]})\n')
-                f.write(f'\t\t\t\te = ({segment["e"][0]}, {segment["e"][1]}, {segment["e"][2]})\n')
-
-                if "ps" in segment:
-                    f.write(f'\t\t\t\tps = {segment["ps"]}\n')
-                if "ns" in segment:
-                    f.write(f'\t\t\t\tns = {segment["ns"]}\n')
-
-                f.write('\t\t\t}\n')
-                
-            f.write('\t\t}\n')
-        f.write('\t}')
-
-    print("Saved road data to segments.txt")
-        
-    with open(f"{map_id}/{map_id}.vtm", "r+") as f:
-        content = f.read()[:-2]  # Read the content and remove the last two characters
-        f.seek(0)  # Move the cursor to the beginning of the file
-        f.truncate()  # Clear the file content
-        f.write(content)  # Write the modified content back to the file
-        with open(f"{map_id}/segments.txt", "r") as r:  
-            f.write(r.read())  # Append the road data
-            f.write('\n}')  # Add the closing bracket
+    with open(f"{map_id}/{map_id}-s.vtm", "r") as f:
+        # delete map_id.vtm if it exists
+        if os.path.exists(f"{map_id}/{map_id}.vtm"):
+            os.remove(f"{map_id}/{map_id}.vtm")
+        with open(f"{map_id}/{map_id}.vtm", "w") as w:
+            content = f.read()[:-2]  # Read the content and remove the last two characters
+            w.write(content)  # Write the modified content back to the file
+            with open(f"{map_id}/segments.txt", "r") as r:  
+                w.write(r.read())  # Append the road data
+                w.write('\n}')  # Add the closing bracket
 
     print("Appended road data to map file")
 
