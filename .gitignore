@@ -1,0 +1,6 @@
+*.vtm
+*.png
+*.json
+*.txt
+*.npy
+__pycache__
